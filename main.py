@@ -4,14 +4,15 @@ import argparse
 import json
 import math
 import sys
+import time
 from dataclasses import replace
 from pathlib import Path
 from typing import Any, Mapping
 
 from auction_family import run_auction
+from output_contract import OutputContractError, atomic_write_json, finalize_answer
 from strong_rag_baseline.agent import EntityResult, _parse_model_json
-from strong_rag_baseline.client import HTTPModelClient, MockModelClient
-from strong_rag_baseline.cli import _mock_reply
+from strong_rag_baseline.client import HTTPModelClient
 from strong_rag_baseline.config import Config
 from strong_rag_baseline.formatter import build_answer
 from strong_rag_baseline.indexer import Chunk, IndexedCorpus, build_index
@@ -19,7 +20,43 @@ from strong_rag_baseline.retriever import BM25Index
 
 BATCH_SIZE = 6
 TOP_K = 5
-MAX_HOUSE_CALLS_GENERIC = 15
+MAX_HOUSE_CALLS_GENERIC = 4
+FINALIZATION_RESERVE_S = 30.0
+
+_POSTEARN_TERMS = (
+    "revenue",
+    "sales",
+    "operating income",
+    "operating margin",
+    "gross margin",
+    "earnings",
+    "guidance",
+    "outlook",
+    "forecast",
+    "expect",
+)
+
+
+def _finite_number(value: object) -> bool:
+    return (
+        isinstance(value, (int, float))
+        and not isinstance(value, bool)
+        and math.isfinite(float(value))
+    )
+
+
+def _target_type(task: Mapping[str, Any]) -> str:
+    target = task.get("target")
+    from_target = target.get("type") if isinstance(target, Mapping) else None
+    from_top = task.get("target_type")
+    if from_target is not None and from_top is not None and from_target != from_top:
+        raise ValueError(
+            f"task target type conflict: {from_target!r} vs {from_top!r}"
+        )
+    value = from_target or from_top
+    if value not in {"classification", "regression", "ranking"}:
+        raise ValueError(f"missing/unsupported target type: {value!r}")
+    return str(value)
 
 
 def _query(task: dict, entity: dict) -> str:
@@ -27,8 +64,15 @@ def _query(task: dict, entity: dict) -> str:
     parts = [
         str(entity.get(k, ""))
         for k in (
-            "entity_id", "name", "ticker", "symbol", "series_id",
-            "description", "sector", "tenor"
+            "entity_id",
+            "name",
+            "ticker",
+            "symbol",
+            "series_id",
+            "cik",
+            "description",
+            "sector",
+            "tenor",
         )
     ]
     parts += [
@@ -37,14 +81,96 @@ def _query(task: dict, entity: dict) -> str:
         str(task.get("prompt", "")),
         "forecast guidance outlook results historical target",
     ]
+    if task.get("family") == "post_earnings_reaction":
+        parts.append(
+            "revenue sales operating income margin earnings guidance outlook"
+        )
     return " ".join(x for x in parts if x)
 
 
+def _doc_matches_entity(entity: dict, chunk: Chunk) -> bool:
+    cik = str(entity.get("cik") or "")
+    if cik:
+        return cik in chunk.doc_id
+    series_id = str(entity.get("series_id") or "")
+    if series_id and series_id.upper() in chunk.doc_id.upper():
+        return True
+    return True
+
+
+def _chunk_relevance(task: dict, chunk: Chunk, base_score: float) -> float:
+    score = float(base_score)
+    if task.get("family") == "post_earnings_reaction":
+        text = chunk.text.lower()
+        strong_terms = (
+            "revenue",
+            "net sales",
+            "operating income",
+            "operating margin",
+            "gross margin",
+            "earnings per share",
+            "diluted earnings",
+            "year-over-year",
+            "year over year",
+            "guidance",
+            "outlook",
+        )
+        business_hits = sum(term in text for term in strong_terms)
+        score = 12.0 * business_hits + 0.15 * float(base_score)
+        if any(
+            noise in text
+            for noise in (
+                "table of contents",
+                "signature",
+                "securities registered pursuant",
+                "cover page",
+                "investor relations website",
+                "tax court",
+                "rivian",
+            )
+        ):
+            score -= 8.0
+    return score
+
+
 def _candidates(task: dict, entity: dict, index: BM25Index) -> list[Chunk]:
-    chunks = [s.chunk for s in index.search(_query(task, entity), TOP_K)]
-    if not chunks and index.chunks:
-        chunks = [index.chunks[0]]
-    return chunks
+    query = _query(task, entity)
+    scored = index.search(query, max(80, TOP_K))
+    scoped = [
+        (s.chunk, _chunk_relevance(task, s.chunk, s.score))
+        for s in scored
+        if _doc_matches_entity(entity, s.chunk)
+    ]
+
+    cik = str(entity.get("cik") or "")
+    if cik and len(scoped) < TOP_K:
+        existing = {(c.doc_id, c.span_start, c.span_end) for c, _ in scoped}
+        q_terms = {x for x in query.lower().split() if len(x) > 2}
+        for chunk in index.chunks:
+            if cik not in chunk.doc_id:
+                continue
+            key = (chunk.doc_id, chunk.span_start, chunk.span_end)
+            if key in existing:
+                continue
+            overlap = len(q_terms & set(chunk.text.lower().split()))
+            scoped.append((chunk, _chunk_relevance(task, chunk, float(overlap))))
+            existing.add(key)
+
+    scoped.sort(
+        key=lambda x: (-x[1], x[0].doc_id, x[0].span_start)
+    )
+    chunks = [c for c, _ in scoped[:TOP_K]]
+
+    if chunks:
+        return chunks
+
+    if cik:
+        return []
+
+    broad = [s.chunk for s in index.search(query, TOP_K)]
+    if not broad and index.chunks:
+        broad = [index.chunks[0]]
+    return broad
 
 
 def _payload_candidates(chunks: list[Chunk]) -> list[dict[str, Any]]:
@@ -65,25 +191,28 @@ def _safe_interval(task: dict, point: float, raw: Any) -> dict[str, float]:
     level = float(task.get("interval_level", 0.90))
     if isinstance(raw, Mapping):
         lo, hi = raw.get("lo"), raw.get("hi")
-        if isinstance(lo, (int, float)) and isinstance(hi, (int, float)):
-            lo, hi = float(lo), float(hi)
-            if math.isfinite(lo) and math.isfinite(hi) and lo <= hi:
-                return {"level": level, "lo": lo, "hi": hi}
+        if _finite_number(lo) and _finite_number(hi):
+            lo_f, hi_f = float(lo), float(hi)
+            if lo_f <= hi_f:
+                return {"level": level, "lo": lo_f, "hi": hi_f}
     if task.get("family") == "credit_event":
         return {"level": level, "lo": 0.0, "hi": 1.0}
-    half = max(1.0, abs(point) * 0.5)
-    return {"level": level, "lo": point - half, "hi": point + half}
+    half = max(1.0, abs(float(point)) * 0.5)
+    return {"level": level, "lo": float(point) - half, "hi": float(point) + half}
 
 
 def _fallback_point(task: dict, entity: dict) -> float:
     if task.get("family") == "credit_event":
         return 0.5
     for key in (
-        "latest_precutoff_estimate", "prior_year_q_eps", "current_eps",
-        "value", "score"
+        "latest_precutoff_estimate",
+        "prior_year_q_eps",
+        "current_eps",
+        "value",
+        "score",
     ):
         x = entity.get(key)
-        if isinstance(x, (int, float)) and math.isfinite(float(x)):
+        if _finite_number(x):
             return float(x)
     return 0.0
 
@@ -95,41 +224,73 @@ def _fallback_label(task: dict, entity: dict, point: float) -> str | None:
     family = task.get("family")
     if family == "eps_yoy_direction":
         prior = entity.get("prior_year_q_eps")
-        if isinstance(prior, (int, float)):
+        if _finite_number(prior):
             candidate = "up" if point > float(prior) else "down"
             if candidate in labels:
                 return candidate
     if family == "macro_revision_direction":
         prior = entity.get("latest_precutoff_estimate")
-        if isinstance(prior, (int, float)):
+        if _finite_number(prior):
             candidate = "up" if point > float(prior) else "down"
             if candidate in labels:
                 return candidate
     if family == "post_earnings_reaction":
-        candidate = "positive_reaction" if point > 1 else ("negative_reaction" if point < -1 else "flat")
+        candidate = (
+            "positive_reaction"
+            if point > 1
+            else ("negative_reaction" if point < -1 else "flat")
+        )
         if candidate in labels:
             return candidate
     return labels[0]
 
 
-def _batch_prompt(task: dict, entities: list[dict], by_entity: dict[str, list[Chunk]]) -> tuple[str, str]:
+def _batch_prompt(
+    task: dict,
+    entities: list[dict],
+    by_entity: dict[str, list[Chunk]],
+) -> tuple[str, str]:
     target = task.get("target", {})
+    target_type = _target_type(task)
     items = []
     for entity in entities:
         eid = str(entity.get("entity_id", ""))
         items.append(
             {
                 "entity_id": eid,
-                "entity": {k: v for k, v in entity.items() if k != "corpus_ref"},
+                "entity": {
+                    k: v for k, v in entity.items() if k != "corpus_ref"
+                },
                 "evidence_candidates": _payload_candidates(by_entity[eid]),
             }
         )
+
+    row_schema: dict[str, Any] = {
+        "entity_id": "string",
+        "point_forecast": 0.0,
+        "interval": {"lo": 0.0, "hi": 0.0},
+        "candidate_ids": ["c1"],
+    }
+    if target_type == "classification":
+        row_schema["label"] = "one allowed task label"
+    if target_type == "ranking":
+        row_schema["rank"] = "integer 1..n"
+
+    unit_hint = ""
+    if task.get("family") == "post_earnings_reaction":
+        unit_hint = (
+            " The point forecast and interval are abnormal return versus SPY in percentage "
+            "points; 1 means +1%, not 0.01. The +/-1% threshold defines the class only and "
+            "must not be treated as the 90% interval."
+        )
+
     system = (
         "You are a financial forecasting agent in a sealed benchmark. "
         "Use ONLY supplied pre-cutoff evidence. For each entity forecast the task target, "
         "give a 90% interval, and select one or two candidate_id values that most strongly "
-        "support the forecast. Evidence must support the prediction rather than merely describe "
-        "the entity. Return one JSON object only. Do not use outside knowledge."
+        "support the forecast. Evidence must belong to the correct entity when entity-specific "
+        "filings are provided. Return one JSON object only. Do not use outside knowledge."
+        + unit_hint
     )
     user = json.dumps(
         {
@@ -137,19 +298,9 @@ def _batch_prompt(task: dict, entities: list[dict], by_entity: dict[str, list[Ch
             "family": task.get("family", ""),
             "cutoff_date": task.get("cutoff_date", ""),
             "target": target,
+            "target_type": target_type,
             "interval_level": task.get("interval_level", 0.90),
-            "output_schema": {
-                "predictions": [
-                    {
-                        "entity_id": "string",
-                        "label": "allowed label or null",
-                        "point_forecast": 0.0,
-                        "rank": "integer or null",
-                        "interval": {"lo": 0.0, "hi": 0.0},
-                        "candidate_ids": ["c1"],
-                    }
-                ]
-            },
+            "output_schema": {"predictions": [row_schema]},
             "entities": items,
         },
         ensure_ascii=False,
@@ -166,11 +317,63 @@ def _claim(eid: str, chunk: Chunk) -> dict[str, Any]:
     }
 
 
-def generic_run(task: dict, corpus_dir: Path, config: Config, use_mock: bool) -> dict:
-    corpus = build_index(corpus_dir)
+def _prediction_row(
+    task: dict,
+    entity: dict,
+    raw: Mapping[str, Any],
+    chunks: list[Chunk],
+) -> dict[str, Any]:
+    target = task.get("target", {})
+    target_type = _target_type(task)
+    allowed_labels = [str(x) for x in target.get("labels", [])]
+    eid = str(entity.get("entity_id", ""))
+
+    p = raw.get("point_forecast")
+    point = float(p) if _finite_number(p) else _fallback_point(task, entity)
+
+    selected: list[Chunk] = []
+    ids = raw.get("candidate_ids")
+    if isinstance(ids, list):
+        for cid in ids[:2]:
+            if isinstance(cid, str) and cid.startswith("c"):
+                try:
+                    idx = int(cid[1:]) - 1
+                except ValueError:
+                    continue
+                if 0 <= idx < len(chunks):
+                    selected.append(chunks[idx])
+    if not selected and chunks:
+        selected = [chunks[0]]
+
+    row: dict[str, Any] = {
+        "entity_id": eid,
+        "point_forecast": point,
+        "interval": _safe_interval(task, point, raw.get("interval")),
+        "claims": [_claim(eid, c) for c in selected],
+    }
+
+    if target_type == "classification":
+        label = (
+            raw.get("label")
+            if isinstance(raw.get("label"), str)
+            else _fallback_label(task, entity, point)
+        )
+        if allowed_labels and label not in allowed_labels:
+            label = _fallback_label(task, entity, point)
+        row["label"] = label
+
+    return row
+
+
+def generic_run(
+    task: dict,
+    corpus_dir: Path,
+    config: Config,
+    use_mock: bool,
+) -> dict:
+    corpus = build_index(corpus_dir, task["cutoff_date"])
     index = BM25Index(corpus.chunks, task["cutoff_date"])
     config = replace(config, max_retries=1)
-    http = HTTPModelClient(config)
     entities = [x for x in task.get("entities", []) if isinstance(x, dict)]
     by_entity = {
         str(e.get("entity_id", "")): _candidates(task, e, index)
@@ -178,67 +381,73 @@ def generic_run(task: dict, corpus_dir: Path, config: Config, use_mock: bool) ->
     }
 
     parsed_by_entity: dict[str, dict] = {}
+    house_calls = 0
+    started = time.monotonic()
+
     if not use_mock and config.model_endpoint:
-        batches = [entities[i:i+BATCH_SIZE] for i in range(0, len(entities), BATCH_SIZE)]
+        batches = [
+            entities[i : i + BATCH_SIZE]
+            for i in range(0, len(entities), BATCH_SIZE)
+        ]
         for batch in batches[:MAX_HOUSE_CALLS_GENERIC]:
+            remaining = config.unit_timeout_s - (time.monotonic() - started)
+            if remaining <= FINALIZATION_RESERVE_S + 10:
+                break
+            allowed_ids = {str(e.get("entity_id", "")) for e in batch}
+            call_config = replace(
+                config,
+                timeout_s=min(
+                    config.timeout_s,
+                    max(10.0, remaining - FINALIZATION_RESERVE_S),
+                ),
+            )
+            http = HTTPModelClient(call_config)
+            house_calls += 1
             try:
                 system, user = _batch_prompt(task, batch, by_entity)
                 parsed = _parse_model_json(http.complete(system, user))
-                for item in parsed.get("predictions", []):
-                    if isinstance(item, dict) and item.get("entity_id"):
-                        parsed_by_entity[str(item["entity_id"])] = item
+                items = parsed.get("predictions")
+                if not isinstance(items, list):
+                    continue
+                seen: set[str] = set()
+                for item in items:
+                    if not isinstance(item, dict):
+                        continue
+                    eid = str(item.get("entity_id") or "")
+                    if eid not in allowed_ids or eid in seen:
+                        continue
+                    parsed_by_entity[eid] = item
+                    seen.add(eid)
             except Exception:
                 continue
 
-    target = task.get("target", {})
-    target_type = target.get("type", "classification")
-    allowed_labels = [str(x) for x in target.get("labels", [])]
-    predictions: list[dict] = []
-
-    for entity in entities:
-        eid = str(entity.get("entity_id", ""))
-        raw = parsed_by_entity.get(eid, {})
-        p = raw.get("point_forecast")
-        point = float(p) if isinstance(p, (int, float)) and math.isfinite(float(p)) else _fallback_point(task, entity)
-        label = raw.get("label") if isinstance(raw.get("label"), str) else _fallback_label(task, entity, point)
-        if allowed_labels and label not in allowed_labels:
-            label = _fallback_label(task, entity, point)
-
-        chunks = by_entity[eid]
-        selected: list[Chunk] = []
-        ids = raw.get("candidate_ids")
-        if isinstance(ids, list):
-            for cid in ids[:2]:
-                if isinstance(cid, str) and cid.startswith("c"):
-                    try:
-                        idx = int(cid[1:]) - 1
-                    except ValueError:
-                        continue
-                    if 0 <= idx < len(chunks):
-                        selected.append(chunks[idx])
-        if not selected and chunks:
-            selected = [chunks[0]]
-
-        predictions.append(
-            {
-                "entity_id": eid,
-                "label": label,
-                "point_forecast": point,
-                "interval": _safe_interval(task, point, raw.get("interval")),
-                "claims": [_claim(eid, c) for c in selected],
-            }
+    predictions = [
+        _prediction_row(
+            task,
+            entity,
+            parsed_by_entity.get(str(entity.get("entity_id", "")), {}),
+            by_entity[str(entity.get("entity_id", ""))],
         )
+        for entity in entities
+    ]
 
+    target_type = _target_type(task)
     if target_type == "ranking":
-        order = sorted(predictions, key=lambda r: (-float(r["point_forecast"]), r["entity_id"]))
+        order = sorted(
+            predictions,
+            key=lambda r: (-float(r["point_forecast"]), r["entity_id"]),
+        )
         ranks = {r["entity_id"]: i + 1 for i, r in enumerate(order)}
-        for r in predictions:
-            r["rank"] = ranks[r["entity_id"]]
+        for row in predictions:
+            row["rank"] = ranks[row["entity_id"]]
 
-    # Formatter self-check via EntityResult wrapper.
-    results = [EntityResult(prediction=p, dropped_claims=0, model_raw="batched") for p in predictions]
+    results = [
+        EntityResult(prediction=p, dropped_claims=0, model_raw="batched")
+        for p in predictions
+    ]
     answer = build_answer(task, results, corpus)
     answer["target_type"] = target_type
+    answer["notes"]["house_calls_attempted"] = house_calls
     answer["notes"]["house_call_cap"] = MAX_HOUSE_CALLS_GENERIC
     answer["notes"]["house_batch_size"] = BATCH_SIZE
     answer["notes"]["retrieval_top_k"] = TOP_K
@@ -246,33 +455,62 @@ def generic_run(task: dict, corpus_dir: Path, config: Config, use_mock: bool) ->
     return answer
 
 
-def auction_run(task: dict, corpus_dir: Path, config: Config, use_mock: bool) -> dict:
-    corpus = build_index(corpus_dir)
+def auction_run(
+    task: dict,
+    corpus_dir: Path,
+    config: Config,
+    use_mock: bool,
+) -> dict:
+    corpus = build_index(corpus_dir, task["cutoff_date"])
     index = BM25Index(corpus.chunks, task["cutoff_date"])
-    config = replace(config, max_retries=1)
-    client = None if use_mock else HTTPModelClient(config)
+    call_config = replace(
+        config,
+        max_retries=1,
+        timeout_s=min(config.timeout_s, max(10.0, config.unit_timeout_s - 60.0)),
+    )
+    client = (
+        None
+        if use_mock or not config.model_endpoint
+        else HTTPModelClient(call_config)
+    )
     return run_auction(task, index, corpus, client)
 
 
 def emergency_answer(task: dict, corpus_dir: Path) -> dict:
-    config = Config.from_env()
-    corpus = build_index(corpus_dir)
-    index = BM25Index(corpus.chunks, task.get("cutoff_date", "9999-12-31"))
-    mock = MockModelClient(reply=_mock_reply)
-    from strong_rag_baseline.agent import run_entity
+    corpus = build_index(corpus_dir, task["cutoff_date"])
+    index = BM25Index(corpus.chunks, task["cutoff_date"])
+    entities = [x for x in task.get("entities", []) if isinstance(x, dict)]
+    predictions: list[dict[str, Any]] = []
+
+    for entity in entities:
+        chunks = _candidates(task, entity, index)
+        predictions.append(_prediction_row(task, entity, {}, chunks))
+
+    target_type = _target_type(task)
+    if target_type == "ranking":
+        order = sorted(
+            predictions,
+            key=lambda r: (-float(r["point_forecast"]), r["entity_id"]),
+        )
+        ranks = {r["entity_id"]: i + 1 for i, r in enumerate(order)}
+        for row in predictions:
+            row["rank"] = ranks[row["entity_id"]]
+
     results = [
-        run_entity(task, entity, index, corpus, mock, max(1, min(TOP_K, config.top_k)))
-        for entity in task.get("entities", [])
+        EntityResult(prediction=p, dropped_claims=0, model_raw="fallback")
+        for p in predictions
     ]
     answer = build_answer(task, results, corpus)
-    answer["target_type"] = task.get("target", {}).get("type")
+    answer["target_type"] = target_type
     answer["notes"]["emergency_fallback"] = True
     return answer
 
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument("verb", nargs="?", default="analyze", choices=["analyze"])
+    parser.add_argument(
+        "verb", nargs="?", default="analyze", choices=["analyze"]
+    )
     parser.add_argument("--task", type=Path, required=True)
     parser.add_argument("--corpus", type=Path, required=True)
     parser.add_argument("--out", type=Path, required=True)
@@ -281,18 +519,32 @@ def main(argv: list[str] | None = None) -> int:
 
     task = json.loads(args.task.read_text(encoding="utf-8"))
     config = Config.from_env()
+    primary_error: Exception | None = None
+
     try:
         if task.get("family") == "auction_demand":
             answer = auction_run(task, args.corpus, config, args.mock)
         else:
             answer = generic_run(task, args.corpus, config, args.mock)
     except Exception as exc:
+        primary_error = exc
         answer = emergency_answer(task, args.corpus)
         answer.setdefault("notes", {})["caught_exception_type"] = type(exc).__name__
 
-    args.out.parent.mkdir(parents=True, exist_ok=True)
-    args.out.write_text(json.dumps(answer, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-    print(f"wrote {args.out} with {len(answer.get('entity_predictions', []))} entities; family={task.get('family','')}")
+    try:
+        answer = finalize_answer(answer, task, args.corpus)
+    except OutputContractError:
+        if primary_error is not None or answer.get("notes", {}).get("emergency_fallback"):
+            raise
+        answer = emergency_answer(task, args.corpus)
+        answer.setdefault("notes", {})["contract_repair_fallback"] = True
+        answer = finalize_answer(answer, task, args.corpus)
+
+    atomic_write_json(args.out, answer)
+    print(
+        f"wrote {args.out} with {len(answer.get('entity_predictions', []))} "
+        f"entities; family={task.get('family','')}"
+    )
     return 0
 
 

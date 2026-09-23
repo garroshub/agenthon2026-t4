@@ -4,11 +4,13 @@ The pipeline is intentionally strict about citations: a claim survives only if
 its quote resolves to an exact span in the cited document (or, failing that, if
 the quote's source chunk is identifiable so the chunk's own offsets can stand
 in). Claims that cannot be grounded are dropped — an ungrounded claim risks the
-faithfulness gate, while a dropped one merely loses a little coverage.
+faithfulness gate. A row with no surviving claim is contract-invalid, so callers must
+repair or reject such a result before serialization.
 """
 from __future__ import annotations
 
 import json
+import math
 import re
 from dataclasses import dataclass
 
@@ -105,15 +107,20 @@ def _best_chunk(quote: str, chunks: list[Chunk]) -> Chunk | None:
     return best[1] if best and best[0] > 0 else None
 
 
+def _finite_number(value: object) -> bool:
+    return (
+        isinstance(value, (int, float))
+        and not isinstance(value, bool)
+        and math.isfinite(float(value))
+    )
+
+
 def _safe_interval(parsed: dict, level: float, point: float | None) -> dict:
     interval = parsed.get("interval") or {}
     lo, hi = interval.get("lo"), interval.get("hi")
-    if isinstance(lo, (int, float)) and isinstance(hi, (int, float)) and lo <= hi:
+    if _finite_number(lo) and _finite_number(hi) and float(lo) <= float(hi):
         return {"level": level, "lo": float(lo), "hi": float(hi)}
-    # Fallback: wide symmetric band around the point forecast (or zero). A missing
-    # lo/hi is not a per-entity coverage penalty -- it fails g1_schema and the WHOLE
-    # submission is scored t4.schema_invalid at W = -0.27 -- so any sane band beats none.
-    center = float(point) if isinstance(point, (int, float)) else 0.0
+    center = float(point) if _finite_number(point) else 0.0
     half = max(abs(center) * 0.5, 1.0)
     return {"level": level, "lo": center - half, "hi": center + half}
 
@@ -131,26 +138,28 @@ def run_entity(
     parsed = _parse_model_json(raw)
 
     target = task.get("target", {})
+    target_type = target.get("type")
     labels = target.get("labels") or []
-    label = parsed.get("label")
-    if labels and label not in labels:
-        label = labels[0]  # deterministic fallback for off-vocabulary labels
 
     point = parsed.get("point_forecast")
-    point_value = float(point) if isinstance(point, (int, float)) else None
+    point_value = float(point) if _finite_number(point) else None
     claims, dropped = _ground_claims(
         parsed.get("evidence") or [], corpus, retrieved
     )
 
     prediction: dict = {
         "entity_id": entity.get("entity_id", ""),
-        "label": label,
         "point_forecast": point_value,
         "interval": _safe_interval(
             parsed, task.get("interval_level", 0.90), point_value
         ),
         "claims": claims,
     }
-    if target.get("type") == "ranking" and isinstance(parsed.get("rank"), int):
+    if target_type == "classification":
+        label = parsed.get("label")
+        if not isinstance(label, str) or (labels and label not in labels):
+            label = labels[0] if labels else ""
+        prediction["label"] = label
+    if target_type == "ranking" and isinstance(parsed.get("rank"), int):
         prediction["rank"] = parsed["rank"]
     return EntityResult(prediction=prediction, dropped_claims=dropped, model_raw=raw)

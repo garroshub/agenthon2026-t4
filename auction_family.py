@@ -292,7 +292,15 @@ def run_auction(
         doc_id = _history_doc_for_tenor(corpus, tenor)
         if not doc_id:
             continue
-        hist = parse_history(corpus.doc_texts[doc_id])
+        cutoff = str(task.get("cutoff_date", ""))
+        hist = sorted(
+            (obs for obs in parse_history(corpus.doc_texts[doc_id]) if obs.date <= cutoff),
+            key=lambda obs: obs.date,
+        )
+        dedup: dict[str, Obs] = {}
+        for obs in hist:
+            dedup[obs.date] = obs
+        hist = list(dedup.values())
         if hist:
             histories[tenor] = hist
             doc_ids[tenor] = doc_id
@@ -307,7 +315,7 @@ def run_auction(
         tenor = str(entity.get("tenor", ""))
         hist = histories.get(tenor, [])
         method, point = final_point(hist, str(entity.get("new_or_reopening", "new")))
-        lo, hi = max(1.0, point - half_width), min(5.0, point + half_width)
+        lo, hi = point - half_width, point + half_width
         candidates = _support_candidates(entity, index, corpus)
         candidates_by_entity[entity_id] = candidates
         support_tasks.append(
@@ -323,7 +331,6 @@ def run_auction(
         predictions.append(
             {
                 "entity_id": entity_id,
-                "label": None,
                 "point_forecast": point,
                 "interval": {
                     "level": task.get("interval_level", 0.90),

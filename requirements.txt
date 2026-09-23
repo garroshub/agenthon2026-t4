@@ -11,3 +11,5 @@
 # (BM25 retrieval + house model over $MODEL_ENDPOINT, or --mock). Unreleased: only its
 # dense index and learned calibration head. Its heavyweight deps (transformers, torch, sentence-transformers,
 # rank-bm25, scikit-learn) are intentionally NOT pinned here.
+
+jsonschema==4.25.1

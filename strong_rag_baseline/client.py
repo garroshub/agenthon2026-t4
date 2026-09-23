@@ -60,6 +60,8 @@ class HTTPModelClient:
             ],
             "temperature": self.config.temperature,
             "seed": self.config.seed,
+            "max_tokens": self.config.max_tokens,
+            "chat_template_kwargs": {"enable_thinking": True},
         }
         headers = {"Content-Type": "application/json"}
         if self.config.model_token:
