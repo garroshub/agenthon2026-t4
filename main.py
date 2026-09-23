@@ -10,6 +10,10 @@ from pathlib import Path
 from typing import Any, Mapping
 
 from auction_family import run_auction
+from cpi_family import run_cpi_component
+from eps_growth_family import run_eps_growth
+from postearn_family import run_postearn
+from rate_curve_family import run_rate_curve
 from output_contract import OutputContractError, atomic_write_json, finalize_answer
 from strong_rag_baseline.agent import EntityResult, _parse_model_json
 from strong_rag_baseline.client import HTTPModelClient
@@ -365,6 +369,32 @@ def _prediction_row(
     return row
 
 
+
+SPECIALIZED_RUNNERS = {
+    "rate_curve_cross_section": run_rate_curve,
+    "eps_growth_regression": run_eps_growth,
+    "post_earnings_reaction": run_postearn,
+}
+
+
+def specialized_run(
+    task: dict,
+    corpus_dir: Path,
+    family: str,
+) -> dict:
+    corpus = build_index(corpus_dir, task["cutoff_date"])
+    index = BM25Index(corpus.chunks, task["cutoff_date"])
+    runner = SPECIALIZED_RUNNERS[family]
+    predictions, adapter_notes = runner(task, index, corpus)
+    results = [
+        EntityResult(prediction=p, dropped_claims=0, model_raw=f"{family}:deterministic")
+        for p in predictions
+    ]
+    answer = build_answer(task, results, corpus)
+    answer["target_type"] = _target_type(task)
+    answer["notes"].update(adapter_notes)
+    return answer
+
 def generic_run(
     task: dict,
     corpus_dir: Path,
@@ -477,6 +507,12 @@ def auction_run(
 
 
 def emergency_answer(task: dict, corpus_dir: Path) -> dict:
+    family = str(task.get("family") or "")
+    if family in SPECIALIZED_RUNNERS:
+        answer = specialized_run(task, corpus_dir, family)
+        answer.setdefault("notes", {})["emergency_fallback"] = True
+        return answer
+
     corpus = build_index(corpus_dir, task["cutoff_date"])
     index = BM25Index(corpus.chunks, task["cutoff_date"])
     entities = [x for x in task.get("entities", []) if isinstance(x, dict)]
@@ -522,8 +558,11 @@ def main(argv: list[str] | None = None) -> int:
     primary_error: Exception | None = None
 
     try:
-        if task.get("family") == "auction_demand":
+        family = str(task.get("family") or "")
+        if family == "auction_demand":
             answer = auction_run(task, args.corpus, config, args.mock)
+        elif family in SPECIALIZED_RUNNERS:
+            answer = specialized_run(task, args.corpus, family)
         else:
             answer = generic_run(task, args.corpus, config, args.mock)
     except Exception as exc:

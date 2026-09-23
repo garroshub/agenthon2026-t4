@@ -35,11 +35,27 @@ class EntityResult:
 
 
 def _parse_model_json(raw: str) -> dict:
-    """Extract the first JSON object from the model reply (tolerates fences)."""
-    match = _JSON_BLOCK.search(raw)
-    if match is None:
-        raise ValueError("model reply contains no JSON object")
-    return json.loads(match.group(0))
+    """Recover a complete JSON object from a reply with optional reasoning prose."""
+    decoder = json.JSONDecoder()
+    candidates: list[dict] = []
+    for i, ch in enumerate(raw):
+        if ch != "{":
+            continue
+        try:
+            obj, _end = decoder.raw_decode(raw[i:])
+        except json.JSONDecodeError:
+            continue
+        if isinstance(obj, dict):
+            candidates.append(obj)
+
+    if not candidates:
+        raise ValueError("model reply contains no complete JSON object")
+
+    preferred_keys = {"predictions", "selections", "judgments", "entity_predictions"}
+    for obj in reversed(candidates):
+        if preferred_keys.intersection(obj):
+            return obj
+    return candidates[-1]
 
 
 def _entity_query(entity: dict) -> str:
