@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any, Mapping
 
 from auction_family import run_auction
+from postearn_v4_family import run_postearn_card
 from eps_growth_family import run_eps_growth
 from output_contract import OutputContractError, atomic_write_json, finalize_answer
 from safe_calibration import apply_safe_calibration
@@ -661,6 +662,17 @@ def main(argv: list[str] | None = None) -> int:
         family = str(task.get("family") or "")
         if family == "auction_demand":
             answer = auction_run(task, args.corpus, config, args.mock)
+        elif family == "post_earnings_reaction":
+            answer = run_postearn_card(
+                task,
+                args.corpus,
+                config,
+                args.mock,
+                MAX_HOUSE_CALLS_GENERIC,
+                FINALIZATION_RESERVE_S,
+                _prediction_row,
+                _merge_valid_prediction_items,
+            )
         elif family in SPECIALIZED_RUNNERS:
             answer = specialized_run(task, args.corpus, family)
         else:
