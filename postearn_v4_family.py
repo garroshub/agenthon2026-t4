@@ -6,7 +6,7 @@ from dataclasses import replace
 from pathlib import Path
 from typing import Any, Callable, Mapping
 
-from postearn_evidence import build_postearn_cards, card_payload
+from postearn_evidence import build_postearn_cards, indexed_card_payload
 from strong_rag_baseline.agent import EntityResult, _parse_model_json
 from strong_rag_baseline.client import HTTPModelClient, MockModelClient
 from strong_rag_baseline.config import Config
@@ -59,7 +59,7 @@ def _prompt(
         payload.append(
             {
                 "entity_id": eid,
-                "fact_card": card_payload(cards[eid]),
+                "fact_card": indexed_card_payload(cards[eid], by_entity[eid]),
                 "evidence_candidates": _candidate_payload(by_entity[eid]),
             }
         )

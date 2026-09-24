@@ -269,3 +269,30 @@ def card_payload(card: EvidenceCard) -> dict[str, Any]:
         "expectation_gap_evidence": refs(card.expectation_gap_chunks),
         "temporal_semantics": card.temporal_semantics,
     }
+
+
+def indexed_card_payload(card: EvidenceCard, chunks: list[Chunk]) -> dict[str, Any]:
+    id_map = {
+        (c.doc_id, c.span_start, c.span_end): f"c{i}"
+        for i, c in enumerate(chunks, 1)
+    }
+
+    def ids(xs: list[Chunk]) -> list[str]:
+        out = []
+        for c in xs:
+            cid = id_map.get((c.doc_id, c.span_start, c.span_end))
+            if cid is not None:
+                out.append(cid)
+        return out
+
+    return {
+        "entity_id": card.entity_id,
+        "name": card.name,
+        "documents": card.doc_ids,
+        "operating_change_candidate_ids": ids(card.facts["operations"]),
+        "management_guidance_candidate_ids": ids(card.facts["guidance"]),
+        "adverse_or_counter_candidate_ids": ids(card.facts["adverse"]),
+        "expectation_gap_status": card.expectation_gap_status,
+        "expectation_gap_candidate_ids": ids(card.expectation_gap_chunks),
+        "temporal_semantics": card.temporal_semantics,
+    }
