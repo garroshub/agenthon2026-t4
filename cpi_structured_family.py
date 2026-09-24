@@ -8,7 +8,7 @@ from dataclasses import replace
 from pathlib import Path
 from typing import Any, Callable, Mapping
 
-import numpy as np
+import statistics
 
 from strong_rag_baseline.agent import EntityResult, _parse_model_json
 from strong_rag_baseline.client import HTTPModelClient, MockModelClient
@@ -98,9 +98,9 @@ def build_cpi_context(
     for entity in task.get("entities", []):
         eid = str(entity["entity_id"])
         hist = [panel[m][eid] for m in range(1, 10)]
-        trailing3 = float(np.mean(hist[-3:]))
-        trailing6 = float(np.mean(hist[-6:]))
-        sd = float(np.std(hist, ddof=0))
+        trailing3 = float(statistics.fmean(hist[-3:]))
+        trailing6 = float(statistics.fmean(hist[-6:]))
+        sd = float(statistics.pstdev(hist))
         card = {
             "entity_id": eid,
             "name": entity.get("name"),
