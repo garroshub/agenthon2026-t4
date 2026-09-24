@@ -27,5 +27,4 @@ jobs:
           push: true
           provenance: false
           tags: |
-            ghcr.io/${{ github.repository_owner }}/agenthon2026-t4:v3-safe
-            ghcr.io/${{ github.repository_owner }}/agenthon2026-t4:latest
+            ghcr.io/${{ github.repository_owner }}/agenthon2026-t4:v4-m1-evidence-only

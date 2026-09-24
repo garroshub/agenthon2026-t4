@@ -21,6 +21,7 @@ RUN pip install --no-cache-dir -r requirements.txt
 COPY strong_rag_baseline ./strong_rag_baseline
 COPY auction_family.py ./auction_family.py
 COPY eps_growth_family.py ./eps_growth_family.py
+COPY postearn_m1_evidence.py ./postearn_m1_evidence.py
 COPY safe_calibration.py ./safe_calibration.py
 COPY ARTIFACT_PROVENANCE.md ./ARTIFACT_PROVENANCE.md
 COPY output_contract.py ./output_contract.py

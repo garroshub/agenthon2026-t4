@@ -12,6 +12,7 @@ from typing import Any, Mapping
 from auction_family import run_auction
 from eps_growth_family import run_eps_growth
 from output_contract import OutputContractError, atomic_write_json, finalize_answer
+from postearn_m1_evidence import build_postearn_cards
 from safe_calibration import apply_safe_calibration
 from strong_rag_baseline.agent import EntityResult, _parse_model_json
 from strong_rag_baseline.client import HTTPModelClient
@@ -416,10 +417,17 @@ def generic_run(
     index = BM25Index(corpus.chunks, task["cutoff_date"])
     config = replace(config, max_retries=1)
     entities = [x for x in task.get("entities", []) if isinstance(x, dict)]
-    by_entity = {
-        str(e.get("entity_id", "")): _candidates(task, e, index)
-        for e in entities
-    }
+
+    if str(task.get("family") or "") == "post_earnings_reaction":
+        # M1 evidence-only ablation: replace only the candidate evidence set.
+        # The V3 system prompt, output schema, batching, parsing, fallback,
+        # calibration, and finalization remain unchanged.
+        _cards, by_entity = build_postearn_cards(task, corpus)
+    else:
+        by_entity = {
+            str(e.get("entity_id", "")): _candidates(task, e, index)
+            for e in entities
+        }
 
     parsed_by_entity: dict[str, dict] = {}
     house_calls = 0
@@ -529,8 +537,17 @@ def emergency_answer(task: dict, corpus_dir: Path) -> dict:
     entities = [x for x in task.get("entities", []) if isinstance(x, dict)]
     predictions: list[dict[str, Any]] = []
 
+    structured_by_entity: dict[str, list[Chunk]] | None = None
+    if family == "post_earnings_reaction":
+        _cards, structured_by_entity = build_postearn_cards(task, corpus)
+
     for entity in entities:
-        chunks = _candidates(task, entity, index)
+        eid = str(entity.get("entity_id", ""))
+        chunks = (
+            structured_by_entity[eid]
+            if structured_by_entity is not None
+            else _candidates(task, entity, index)
+        )
         predictions.append(_prediction_row(task, entity, {}, chunks))
 
     target_type = _target_type(task)
