@@ -406,6 +406,50 @@ def specialized_run(
     answer["notes"].update(adapter_notes)
     return answer
 
+def _merge_valid_prediction_items(
+    parsed_by_entity: dict[str, dict],
+    parsed: Mapping[str, Any],
+    allowed_ids: set[str],
+) -> set[str]:
+    """Merge only structurally useful House rows and return accepted entity IDs.
+
+    A row without a finite point forecast is treated as missing so the generic
+    runtime gets one chance to repair it instead of silently converting it to
+    the deterministic zero/default fallback.
+    """
+    items = parsed.get("predictions")
+    if not isinstance(items, list):
+        return set()
+
+    accepted: set[str] = set()
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        eid = str(item.get("entity_id") or "")
+        if eid not in allowed_ids or eid in accepted:
+            continue
+        if not _finite_number(item.get("point_forecast")):
+            continue
+        parsed_by_entity[eid] = item
+        accepted.add(eid)
+    return accepted
+
+
+def _repair_prompt(
+    task: dict,
+    missing_entities: list[dict],
+    by_entity: dict[str, list[Chunk]],
+) -> tuple[str, str]:
+    system, user = _batch_prompt(task, missing_entities, by_entity)
+    system += (
+        " This is a STRICT REPAIR CALL for entities missing a usable numeric "
+        "point_forecast from an earlier response. Return every requested entity "
+        "exactly once. Do not omit any entity. point_forecast must be a finite "
+        "number. Return JSON only and preserve the original task semantics."
+    )
+    return system, user
+
+
 def generic_run(
     task: dict,
     corpus_dir: Path,
@@ -447,20 +491,57 @@ def generic_run(
             try:
                 system, user = _batch_prompt(task, batch, by_entity)
                 parsed = _parse_model_json(http.complete(system, user))
-                items = parsed.get("predictions")
-                if not isinstance(items, list):
-                    continue
-                seen: set[str] = set()
-                for item in items:
-                    if not isinstance(item, dict):
-                        continue
-                    eid = str(item.get("entity_id") or "")
-                    if eid not in allowed_ids or eid in seen:
-                        continue
-                    parsed_by_entity[eid] = item
-                    seen.add(eid)
+                _merge_valid_prediction_items(
+                    parsed_by_entity,
+                    parsed,
+                    allowed_ids,
+                )
             except Exception:
                 continue
+
+        # One targeted repair pass for entities whose House row was absent,
+        # malformed, duplicated without a valid point, or non-numeric. Complete
+        # first-pass rows are never re-asked or overwritten.
+        missing_entities = [
+            e
+            for e in entities
+            if str(e.get("entity_id", "")) not in parsed_by_entity
+        ]
+        repair_calls = 0
+        repaired_entities: set[str] = set()
+        if missing_entities and house_calls < MAX_HOUSE_CALLS_GENERIC:
+            remaining = config.unit_timeout_s - (time.monotonic() - started)
+            if remaining > FINALIZATION_RESERVE_S + 10:
+                allowed_ids = {
+                    str(e.get("entity_id", "")) for e in missing_entities
+                }
+                repair_config = replace(
+                    config,
+                    timeout_s=min(
+                        config.timeout_s,
+                        max(10.0, remaining - FINALIZATION_RESERVE_S),
+                    ),
+                )
+                http = HTTPModelClient(repair_config)
+                house_calls += 1
+                repair_calls += 1
+                try:
+                    system, user = _repair_prompt(
+                        task,
+                        missing_entities,
+                        by_entity,
+                    )
+                    parsed = _parse_model_json(http.complete(system, user))
+                    repaired_entities = _merge_valid_prediction_items(
+                        parsed_by_entity,
+                        parsed,
+                        allowed_ids,
+                    )
+                except Exception:
+                    repaired_entities = set()
+    else:
+        repair_calls = 0
+        repaired_entities = set()
 
     predictions = [
         _prediction_row(
@@ -488,7 +569,15 @@ def generic_run(
     ]
     answer = build_answer(task, results, corpus)
     answer["target_type"] = target_type
+    fallback_entities = [
+        str(e.get("entity_id", ""))
+        for e in entities
+        if str(e.get("entity_id", "")) not in parsed_by_entity
+    ]
     answer["notes"]["house_calls_attempted"] = house_calls
+    answer["notes"]["house_repair_calls"] = repair_calls
+    answer["notes"]["house_repaired_entities"] = sorted(repaired_entities)
+    answer["notes"]["house_fallback_entities"] = fallback_entities
     answer["notes"]["house_call_cap"] = MAX_HOUSE_CALLS_GENERIC
     answer["notes"]["house_batch_size"] = BATCH_SIZE
     answer["notes"]["retrieval_top_k"] = TOP_K
