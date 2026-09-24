@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any, Mapping
 
 from auction_family import run_auction
+from cot_joint_family import run_cot_joint
 from eps_growth_family import run_eps_growth
 from output_contract import OutputContractError, atomic_write_json, finalize_answer
 from safe_calibration import apply_safe_calibration
@@ -572,6 +573,14 @@ def main(argv: list[str] | None = None) -> int:
         family = str(task.get("family") or "")
         if family == "auction_demand":
             answer = auction_run(task, args.corpus, config, args.mock)
+        elif family == "positioning_shift":
+            answer = run_cot_joint(
+                task,
+                args.corpus,
+                config,
+                args.mock,
+                _prediction_row,
+            )
         elif family in SPECIALIZED_RUNNERS:
             answer = specialized_run(task, args.corpus, family)
         else:
