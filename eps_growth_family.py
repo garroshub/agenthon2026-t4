@@ -158,6 +158,9 @@ def _driver_chunk(
     return rows[0] if rows else None
 
 
+_LEARNED_ARTIFACT_CUTOFF = "2024-10-10"
+
+
 def run_eps_growth(
     task: dict[str, Any],
     index: BM25Index,
@@ -168,13 +171,25 @@ def run_eps_growth(
     available = [s.growth_pct for s in signals.values() if s is not None]
     median = statistics.median(available) if available else 0.0
 
-    # Nested historical validation uses pre-holdout quarterly transitions:
-    # parameters are selected on 2022Q1-2024Q2 and 2024Q3 stays untouched.
-    # The stable validation choice is 0.75 persistence after clipping the
-    # previous-quarter YoY signal at +/-60pp, with a roughly 46pp 90% error band.
-    alpha = 0.75
-    signal_clip = 60.0
-    half_width = 46.0
+    cutoff = str(task.get("cutoff_date") or "")
+    if cutoff >= _LEARNED_ARTIFACT_CUTOFF:
+        # Offline selection uses only quarterly transitions whose labels were
+        # available by this artifact cutoff. Pooled cutoff-safe historical
+        # selection chooses 0.75 persistence after clipping the lagged YoY
+        # signal at +/-50pp. The 90% absolute residual half-width is
+        # 77.52301640441917pp. Public Q3 outcomes are held out from selection.
+        alpha = 0.75
+        signal_clip = 50.0
+        half_width = 77.52301640441917
+        parameter_source = "pre_2024q3_cutoff_safe_historical_selection"
+
+    else:
+        # Runtime-only semantic fallback: still predict YoY growth percent,
+        # never prior-year EPS dollars. No learned calibration constants.
+        alpha = 1.0
+        signal_clip = 100.0
+        half_width = 100.0
+        parameter_source = "code_only_semantic_fallback"
     level = float(task.get("interval_level", 0.90))
     predictions: list[dict[str, Any]] = []
     signal_notes: dict[str, Any] = {}
@@ -238,8 +253,10 @@ def run_eps_growth(
         }
 
     notes = {
-        "adapter": "eps_growth_v3",
+        "adapter": "eps_growth_safe_v3",
         "shrinkage_alpha": alpha,
+        "parameter_source": parameter_source,
+        "learned_artifact_cutoff": _LEARNED_ARTIFACT_CUTOFF,
         "cross_section_median_q2_yoy_growth_pct": median,
         "shrinkage_target_pct": 0.0,
         "signal_clip_pct_points": signal_clip,

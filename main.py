@@ -10,11 +10,9 @@ from pathlib import Path
 from typing import Any, Mapping
 
 from auction_family import run_auction
-from cpi_family import run_cpi_component
 from eps_growth_family import run_eps_growth
-from postearn_family import run_postearn
-from rate_curve_family import run_rate_curve
 from output_contract import OutputContractError, atomic_write_json, finalize_answer
+from safe_calibration import apply_safe_calibration
 from strong_rag_baseline.agent import EntityResult, _parse_model_json
 from strong_rag_baseline.client import HTTPModelClient
 from strong_rag_baseline.config import Config
@@ -281,11 +279,26 @@ def _batch_prompt(
         row_schema["rank"] = "integer 1..n"
 
     unit_hint = ""
-    if task.get("family") == "post_earnings_reaction":
+    family = str(task.get("family") or "")
+    if family == "post_earnings_reaction":
         unit_hint = (
-            " The point forecast and interval are abnormal return versus SPY in percentage "
-            "points; 1 means +1%, not 0.01. The +/-1% threshold defines the class only and "
-            "must not be treated as the 90% interval."
+            " The target is the market-adjusted one-day abnormal return after the earnings "
+            "release, not whether company fundamentals merely improved year over year. "
+            "Classify the likely MARKET REACTION as positive_reaction, negative_reaction, or "
+            "flat. Treat flat as a narrow +/-1 percentage-point reaction band, not as a safe "
+            "default. Use revenue, margins, EPS, guidance/outlook and explicit surprise cues "
+            "to infer whether the release is likely to exceed or disappoint market expectations. "
+            "The numeric point and interval are abnormal return versus SPY in PERCENTAGE POINTS; "
+            "1 means +1%, not 0.01. Do not use +/-1% as the 90% interval."
+        )
+    elif family == "rate_curve_cross_section":
+        unit_hint = (
+            " The target is the CHANGE in each Treasury constant-maturity yield between the "
+            "cutoff close and resolution close, measured in BASIS POINTS, not the yield level. "
+            "Use start_yield_pct as the anchor and reason about both the common level move and "
+            "maturity-specific curve shape. A 0.50 percentage-point yield move equals 50 bps. "
+            "The horizon spans an inter-meeting window, so do not default to an unrealistically "
+            "tight +/-1 bp interval."
         )
 
     system = (
@@ -371,9 +384,7 @@ def _prediction_row(
 
 
 SPECIALIZED_RUNNERS = {
-    "rate_curve_cross_section": run_rate_curve,
     "eps_growth_regression": run_eps_growth,
-    "post_earnings_reaction": run_postearn,
 }
 
 
@@ -570,6 +581,8 @@ def main(argv: list[str] | None = None) -> int:
         answer = emergency_answer(task, args.corpus)
         answer.setdefault("notes", {})["caught_exception_type"] = type(exc).__name__
 
+    answer = apply_safe_calibration(task, answer)
+
     try:
         answer = finalize_answer(answer, task, args.corpus)
     except OutputContractError:
@@ -577,6 +590,7 @@ def main(argv: list[str] | None = None) -> int:
             raise
         answer = emergency_answer(task, args.corpus)
         answer.setdefault("notes", {})["contract_repair_fallback"] = True
+        answer = apply_safe_calibration(task, answer)
         answer = finalize_answer(answer, task, args.corpus)
 
     atomic_write_json(args.out, answer)
