@@ -90,3 +90,51 @@ This is a deterministic task-semantics rule. It does not use historical earnings
 BM25 retrieval, schema validation, cutoff filtering, output sanitation, and deterministic numerical transformations are code paths rather than learned models. They do not introduce external inference-time documents.
 
 The House model remains the only language model used at evaluation time.
+
+
+## 5. V5.2 classification interval calibration
+
+### 5.1 Credit-event probability support interval
+
+Runtime file: `safe_calibration.py`.
+
+Purpose: replace the House-supplied 90% probability interval for `credit_event` with the deterministic probability support `[0, 1]`, while leaving the House label, point forecast and citations unchanged.
+
+Source: task semantics only. The published task defines `point_forecast` as the predicted probability of a credit event on the 0-to-1 scale and asks for an interval on that probability.
+
+No fitted artifact, historical outcome, or post-cutoff label is used.
+
+### 5.2 EPS YoY diluted-EPS interval artifact
+
+Runtime file: `safe_calibration.py`.
+
+Purpose: calibrate the numeric interval for `eps_yoy_direction` without altering the House label, House diluted-EPS point forecast, or citations.
+
+Source data: SEC EDGAR Company Facts, diluted-EPS facts for the six published `eps_yoy_direction` issuers. The reproduction script admits only 10-Q/10-K EPS observations whose `filed` date is on or before the task cutoff, 2023-07-14. The calibration targets stop at 2023Q1. The post-cutoff 2023Q2 realized EPS values are not read or used for fitting, model selection, calibration, or validation.
+
+Historical calibration sample:
+- 208 same-quarter year-over-year EPS pairs.
+- 16 historical quarter groups.
+- pooled q90 of `|EPS_t - EPS_{t-4}|` = 0.9440000000000011 USD/share.
+- empirical pooled coverage of `EPS_{t-4} +/- q90` = 0.8990384615384616.
+
+Runtime rule:
+1. construct the cutoff-safe historical band `prior_year_q_eps +/- 0.9440000000000011`;
+2. expand the band only if required to contain the unchanged House point forecast;
+3. do not alter label, point forecast, rank, claims, or citations.
+
+SEC Company Facts caches used for reproduction:
+- `companyfacts_0000002488.json`: `a4b6a0e20800dd647bc1d08a7eb9cd407b4bf27b4bc8cfedbeabde7a12d235f5`
+- `companyfacts_0000051143.json`: `ca9c6eeedeadbea0c897bba0c140d4037683c8a68785f97b8e73de9def2c9dc1`
+- `companyfacts_0000097745.json`: `b385db1c4ceda2391698528a617ae824c37fdc088da51be9c47aa20496e38a89`
+- `companyfacts_0000318154.json`: `a1a09e6f630ce46326a72d43f279cdcda6d6081a81cfd5c63942551599b3340c`
+- `companyfacts_0000773840.json`: `c89fe74aebe6d2781ceaf6a146c45a30f5ed173e6c8b1902145e59cb3ac9fd1d`
+- `companyfacts_0001751788.json`: `d7cf6bd1227d90dcdfdedc8923fe2923b0e8639c1223552a5b4ebeb17dd3c144`
+
+Reproduction script:
+`experiments/v5_eps_yoy_interval_replay.py`
+
+Reproduction report:
+`outputs/v5-classification-intervals/eps_yoy_interval_replay.json`
+
+Cutoff gate: the learned EPS interval artifact is used only when `cutoff_date >= 2023-07-14`.
