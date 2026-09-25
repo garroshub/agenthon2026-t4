@@ -286,10 +286,17 @@ def _batch_prompt(
             "release, not whether company fundamentals merely improved year over year. "
             "Classify the likely MARKET REACTION as positive_reaction, negative_reaction, or "
             "flat. Treat flat as a narrow +/-1 percentage-point reaction band, not as a safe "
-            "default. Use revenue, margins, EPS, guidance/outlook and explicit surprise cues "
-            "to infer whether the release is likely to exceed or disappoint market expectations. "
-            "The numeric point and interval are abnormal return versus SPY in PERCENTAGE POINTS; "
-            "1 means +1%, not 0.01. Do not use +/-1% as the 90% interval."
+            "default. The reaction is relative to what investors likely expected before the "
+            "release. Use explicit pre-cutoff expectation or surprise evidence when it exists. "
+            "If reliable consensus/expectation evidence is absent from the supplied corpus, do "
+            "not invent it and do not treat strong historical operating results alone as proof "
+            "of a positive surprise. Distinguish backward-looking actual results from explicit "
+            "forward guidance/outlook. Weigh adverse or counter evidence against positive "
+            "operating momentum before choosing a class. Use revenue, margins, EPS, explicit "
+            "guidance/outlook and genuine surprise cues to infer whether the release is likely "
+            "to exceed or disappoint expectations. The numeric point and interval are abnormal "
+            "return versus SPY in PERCENTAGE POINTS; 1 means +1%, not 0.01. Do not use +/-1% as "
+            "the 90% interval."
         )
     elif family == "rate_curve_cross_section":
         unit_hint = (
