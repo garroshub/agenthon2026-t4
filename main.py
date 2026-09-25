@@ -13,6 +13,7 @@ from auction_family import run_auction
 from eps_growth_family import run_eps_growth
 from output_contract import OutputContractError, atomic_write_json, finalize_answer
 from safe_calibration import apply_safe_calibration
+from v6_e1_eps_adapter import apply_v6_e1_eps_adapter
 from strong_rag_baseline.agent import EntityResult, _parse_model_json
 from strong_rag_baseline.client import HTTPModelClient
 from strong_rag_baseline.config import Config
@@ -782,6 +783,7 @@ def main(argv: list[str] | None = None) -> int:
         answer = emergency_answer(task, args.corpus)
         answer.setdefault("notes", {})["caught_exception_type"] = type(exc).__name__
 
+    answer = apply_v6_e1_eps_adapter(task, answer, args.corpus)
     answer = apply_safe_calibration(task, answer)
 
     try:
@@ -791,6 +793,7 @@ def main(argv: list[str] | None = None) -> int:
             raise
         answer = emergency_answer(task, args.corpus)
         answer.setdefault("notes", {})["contract_repair_fallback"] = True
+        answer = apply_v6_e1_eps_adapter(task, answer, args.corpus)
         answer = apply_safe_calibration(task, answer)
         answer = finalize_answer(answer, task, args.corpus)
 

@@ -146,3 +146,15 @@ Selection report:
 outputs/v5-classification-intervals/eps_yoy_interval_quantile_battery.json
 
 Cutoff gate: the learned EPS interval artifact is used only when `cutoff_date >= 2023-07-14`.
+
+## V6-E1 EPS issuer-gated deterministic adapter — 2026-09-25
+
+- Base source: V5.2 commit fc12b8cee2210fad91676ff7cff5ae8946025ca9.
+- Gate: issuer-level pre-2021 persistence history n>=12 and accuracy >=0.60; active issuers AMD, AMGN, HON, TMO.
+- Historical diagnostic after gate lock: 14/19 correct over 2021-2022. This is small-sample development evidence, not a claim of independence or House superiority.
+- Runtime rule: after the unmodified V5.2 base path, verify the locked pre-cutoff Q1 GAAP diluted-EPS source span for each active issuer. If any source/task field check fails, preserve the complete base row.
+- Point rule: prior-year target-quarter EPS plus latest prior-quarter EPS minus year-ago prior-quarter EPS. Exact ties preserve base.
+- The adapter changes no House prompt, retrieval, seed, retry, call budget, or non-EPS family.
+- On an override, existing V5.2/House citations are preserved and the locked cutoff-safe GAAP diluted-EPS input span is appended. This avoids discarding the base prediction-support chain while retaining an auditable citation for the deterministic inputs.
+- V5.2 q96 interval calibration remains the only EPS interval rail and runs after the adapter.
+- Protocol lock: outputs/v6-e1-eps-probe/V6_E1_PROTOCOL_LOCK.json in the research workspace.
