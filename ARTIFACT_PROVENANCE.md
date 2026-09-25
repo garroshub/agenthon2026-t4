@@ -115,11 +115,17 @@ Source data: SEC EDGAR Company Facts, diluted-EPS facts for the six published `e
 Historical calibration sample:
 - 208 same-quarter year-over-year EPS pairs.
 - 16 historical quarter groups.
-- pooled q90 of `|EPS_t - EPS_{t-4}|` = 0.9440000000000011 USD/share.
-- empirical pooled coverage of `EPS_{t-4} +/- q90` = 0.8990384615384616.
+- Candidate residual quantiles: 0.90, 0.925, 0.95, 0.96, 0.975, and 0.99.
+- Selection criterion: minimize the mean of rolling late-period and leave-one-issuer-out absolute distance from 0.90 coverage.
+- Selected quantile: 0.96.
+- Selected full-sample half-width: 2.6659999999999995 USD/share.
+- Full-sample pooled coverage: 0.9567307692307693.
+- Rolling 2020Q1-2023Q1 weighted coverage: 0.9333333333333333.
+- Leave-one-issuer-out mean coverage: 0.943702490286341.
+- Leave-one-issuer-out worst coverage: 0.8888888888888888.
 
 Runtime rule:
-1. construct the cutoff-safe historical band `prior_year_q_eps +/- 0.9440000000000011`;
+1. construct the cutoff-safe historical band prior_year_q_eps +/- 2.6659999999999995;
 2. expand the band only if required to contain the unchanged House point forecast;
 3. do not alter label, point forecast, rank, claims, or citations.
 
@@ -131,10 +137,12 @@ SEC Company Facts caches used for reproduction:
 - `companyfacts_0000773840.json`: `c89fe74aebe6d2781ceaf6a146c45a30f5ed173e6c8b1902145e59cb3ac9fd1d`
 - `companyfacts_0001751788.json`: `d7cf6bd1227d90dcdfdedc8923fe2923b0e8639c1223552a5b4ebeb17dd3c144`
 
-Reproduction script:
-`experiments/v5_eps_yoy_interval_replay.py`
+Reproduction scripts:
+- experiments/v5_eps_yoy_interval_replay.py
+- experiments/v52_eps_interval_robustness.py
+- experiments/v52_eps_interval_quantile_battery.py
 
-Reproduction report:
-`outputs/v5-classification-intervals/eps_yoy_interval_replay.json`
+Selection report:
+outputs/v5-classification-intervals/eps_yoy_interval_quantile_battery.json
 
 Cutoff gate: the learned EPS interval artifact is used only when `cutoff_date >= 2023-07-14`.

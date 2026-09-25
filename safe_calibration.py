@@ -48,12 +48,15 @@ _CREDIT_INTERVAL_HI = 1.0
 # Offline interval artifact built only from SEC Company Facts values available
 # on/before 2023-07-14 for the six published issuers.
 # Historical same-quarter EPS pairs through 2023Q1: n=208.
-# q90(|EPS_t - EPS_{t-4}|) = 0.9440000000000011 USD/share.
-# Historical pooled coverage of prior-year-EPS +/- q90 = 0.8990384615384616.
+# q96(|EPS_t - EPS_{t-4}|) = 2.6659999999999995 USD/share.
+# Full-sample pooled coverage of prior-year-EPS +/- q96 = 0.9567307692307693.
 _EPS_YOY_INTERVAL_ARTIFACT_AVAILABLE = "2023-07-14"
-_EPS_YOY_PRIOR_BAND_HALF_WIDTH = 0.9440000000000011
+_EPS_YOY_PRIOR_BAND_HALF_WIDTH = 2.6659999999999995
 _EPS_YOY_HISTORICAL_PAIRS = 208
-_EPS_YOY_HISTORICAL_COVERAGE = 0.8990384615384616
+_EPS_YOY_SELECTED_QUANTILE = 0.96
+_EPS_YOY_HISTORICAL_COVERAGE = 0.9567307692307693
+_EPS_YOY_ROLLING_LATE_COVERAGE = 0.9333333333333333
+_EPS_YOY_LOIO_MEAN_COVERAGE = 0.943702490286341
 
 
 def _finite_number(value: object) -> bool:
@@ -227,11 +230,14 @@ def apply_safe_calibration(task: dict[str, Any], answer: dict[str, Any]) -> dict
         if changed:
             notes["classification_interval_calibration"] = {
                 "family": family,
-                "rule": "prior_year_eps_q90_band_expanded_to_house_point",
+                "rule": "prior_year_eps_q96_band_expanded_to_house_point",
                 "artifact_available": _EPS_YOY_INTERVAL_ARTIFACT_AVAILABLE,
                 "historical_pairs": _EPS_YOY_HISTORICAL_PAIRS,
+                "selected_quantile": _EPS_YOY_SELECTED_QUANTILE,
                 "historical_half_width_usd_per_share": _EPS_YOY_PRIOR_BAND_HALF_WIDTH,
                 "historical_coverage": _EPS_YOY_HISTORICAL_COVERAGE,
+                "rolling_late_coverage": _EPS_YOY_ROLLING_LATE_COVERAGE,
+                "leave_one_issuer_out_mean_coverage": _EPS_YOY_LOIO_MEAN_COVERAGE,
                 "rows_adjusted": changed,
                 "point_label_citations_unchanged": True,
             }

@@ -35,7 +35,7 @@ class V52SafeCalibrationTests(unittest.TestCase):
         self.assertEqual(row["interval"],{"level":0.9,"lo":0.0,"hi":1.0})
         self.assertEqual(out["notes"]["keep"],"yes")
 
-    def test_eps_q90_band_preserves_point_label_claims(self):
+    def test_eps_q96_band_preserves_point_label_claims(self):
         task=self._task("t4-eps-yoy-2023Q2-mixed")
         answer={
             "entity_predictions":[{

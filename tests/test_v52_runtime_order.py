@@ -96,7 +96,7 @@ class V52RuntimeOrderTests(unittest.TestCase):
         before={r["entity_id"]:(r["label"],r["point_forecast"],r["claims"]) for r in raw["entity_predictions"]}
         entities={e["entity_id"]:e for e in task["entities"]}
         out=apply_safe_calibration(task,raw)
-        half=0.9440000000000011
+        half=2.6659999999999995
         for r in out["entity_predictions"]:
             self.assertEqual((r["label"],r["point_forecast"],r["claims"]),before[r["entity_id"]])
             prior=float(entities[r["entity_id"]]["prior_year_q_eps"])
