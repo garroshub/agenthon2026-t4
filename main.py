@@ -25,6 +25,9 @@ TOP_K = 5
 MAX_HOUSE_CALLS_GENERIC = 4
 FINALIZATION_RESERVE_S = 30.0
 
+_STABILITY_FAMILIES = {"positioning_shift", "credit_event"}
+_STABILITY_ALT_SEED_OFFSET = 104729
+
 _POSTEARN_TERMS = (
     "revenue",
     "sales",
@@ -406,6 +409,187 @@ def specialized_run(
     answer["notes"].update(adapter_notes)
     return answer
 
+def _collect_house_seed(
+    task: dict,
+    entities: list[dict],
+    by_entity: dict[str, list[Chunk]],
+    config: Config,
+    started: float,
+    seed: int,
+    call_budget: int,
+) -> tuple[dict[str, dict], int]:
+    parsed_by_entity: dict[str, dict] = {}
+    calls = 0
+    batches = [
+        entities[i : i + BATCH_SIZE]
+        for i in range(0, len(entities), BATCH_SIZE)
+    ]
+    for batch in batches:
+        if calls >= call_budget:
+            break
+        remaining = config.unit_timeout_s - (time.monotonic() - started)
+        if remaining <= FINALIZATION_RESERVE_S + 10:
+            break
+        allowed_ids = {str(e.get("entity_id", "")) for e in batch}
+        call_config = replace(
+            config,
+            seed=seed,
+            timeout_s=min(
+                config.timeout_s,
+                max(10.0, remaining - FINALIZATION_RESERVE_S),
+            ),
+        )
+        http = HTTPModelClient(call_config)
+        calls += 1
+        try:
+            system, user = _batch_prompt(task, batch, by_entity)
+            parsed = _parse_model_json(http.complete(system, user))
+            items = parsed.get("predictions")
+            if not isinstance(items, list):
+                continue
+            seen: set[str] = set()
+            for item in items:
+                if not isinstance(item, dict):
+                    continue
+                eid = str(item.get("entity_id") or "")
+                if eid not in allowed_ids or eid in seen:
+                    continue
+                parsed_by_entity[eid] = item
+                seen.add(eid)
+        except Exception:
+            continue
+    return parsed_by_entity, calls
+
+
+def _mean_interval_rows(
+    base: Mapping[str, Any],
+    alt: Mapping[str, Any],
+) -> dict[str, float] | None:
+    a = base.get("interval")
+    b = alt.get("interval")
+    if not (isinstance(a, Mapping) and isinstance(b, Mapping)):
+        return None
+    alo, ahi = a.get("lo"), a.get("hi")
+    blo, bhi = b.get("lo"), b.get("hi")
+    if not all(_finite_number(x) for x in (alo, ahi, blo, bhi)):
+        return None
+    if float(alo) > float(ahi) or float(blo) > float(bhi):
+        return None
+    return {
+        "level": float(task_level)
+        if (task_level := a.get("level", b.get("level"))) is not None
+        and _finite_number(task_level)
+        else 0.90,
+        "lo": (float(alo) + float(blo)) / 2.0,
+        "hi": (float(ahi) + float(bhi)) / 2.0,
+    }
+
+
+def _aggregate_stability_predictions(
+    task: dict,
+    entities: list[dict],
+    by_entity: dict[str, list[Chunk]],
+    base_raw: dict[str, dict],
+    alt_raw: dict[str, dict],
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    family = str(task.get("family") or "")
+    base_rows = {
+        str(entity.get("entity_id", "")): _prediction_row(
+            task,
+            entity,
+            base_raw.get(str(entity.get("entity_id", "")), {}),
+            by_entity[str(entity.get("entity_id", ""))],
+        )
+        for entity in entities
+    }
+    alt_rows = {
+        str(entity.get("entity_id", "")): _prediction_row(
+            task,
+            entity,
+            alt_raw.get(str(entity.get("entity_id", "")), {}),
+            by_entity[str(entity.get("entity_id", ""))],
+        )
+        for entity in entities
+    }
+
+    actions: dict[str, str] = {}
+    predictions: list[dict[str, Any]] = []
+
+    for entity in entities:
+        eid = str(entity.get("entity_id", ""))
+        base = dict(base_rows[eid])
+        alt = alt_rows[eid]
+        base_has_house = eid in base_raw
+        alt_has_house = eid in alt_raw
+
+        if family == "positioning_shift":
+            if (
+                base_has_house
+                and alt_has_house
+                and _finite_number(base.get("point_forecast"))
+                and _finite_number(alt.get("point_forecast"))
+            ):
+                base["point_forecast"] = (
+                    float(base["point_forecast"]) + float(alt["point_forecast"])
+                ) / 2.0
+                interval = _mean_interval_rows(base_rows[eid], alt_rows[eid])
+                if interval is not None:
+                    base["interval"] = interval
+                actions[eid] = "average_two_seed_points"
+            else:
+                actions[eid] = "base_seed_fallback"
+            predictions.append(base)
+            continue
+
+        if family == "credit_event":
+            if not (base_has_house and alt_has_house):
+                actions[eid] = "base_seed_fallback"
+                predictions.append(base)
+                continue
+            if base.get("label") != alt.get("label"):
+                actions[eid] = "base_on_label_disagreement"
+                predictions.append(base)
+                continue
+            if not (
+                _finite_number(base.get("point_forecast"))
+                and _finite_number(alt.get("point_forecast"))
+            ):
+                actions[eid] = "base_on_invalid_point"
+                predictions.append(base)
+                continue
+            base["point_forecast"] = (
+                float(base["point_forecast"]) + float(alt["point_forecast"])
+            ) / 2.0
+            interval = _mean_interval_rows(base_rows[eid], alt_rows[eid])
+            if interval is not None:
+                base["interval"] = interval
+            actions[eid] = "agreed_label_average_point"
+            predictions.append(base)
+            continue
+
+        raise ValueError(f"unsupported stability family: {family}")
+
+    if family == "positioning_shift":
+        order = sorted(
+            predictions,
+            key=lambda r: (-float(r["point_forecast"]), r["entity_id"]),
+        )
+        ranks = {r["entity_id"]: i + 1 for i, r in enumerate(order)}
+        for row in predictions:
+            row["rank"] = ranks[row["entity_id"]]
+
+    notes = {
+        "house_stability_ensemble": True,
+        "house_stability_family": family,
+        "house_stability_actions": actions,
+        "house_stability_base_seed": int(task.get("_base_seed", 0)),
+        "house_stability_alt_seed_offset": _STABILITY_ALT_SEED_OFFSET,
+        "house_stability_base_house_rows": len(base_raw),
+        "house_stability_alt_house_rows": len(alt_raw),
+    }
+    return predictions, notes
+
+
 def generic_run(
     task: dict,
     corpus_dir: Path,
@@ -424,56 +608,72 @@ def generic_run(
     parsed_by_entity: dict[str, dict] = {}
     house_calls = 0
     started = time.monotonic()
+    stability_notes: dict[str, Any] = {}
 
-    if not use_mock and config.model_endpoint:
-        batches = [
-            entities[i : i + BATCH_SIZE]
-            for i in range(0, len(entities), BATCH_SIZE)
-        ]
-        for batch in batches[:MAX_HOUSE_CALLS_GENERIC]:
-            remaining = config.unit_timeout_s - (time.monotonic() - started)
-            if remaining <= FINALIZATION_RESERVE_S + 10:
-                break
-            allowed_ids = {str(e.get("entity_id", "")) for e in batch}
-            call_config = replace(
-                config,
-                timeout_s=min(
-                    config.timeout_s,
-                    max(10.0, remaining - FINALIZATION_RESERVE_S),
-                ),
-            )
-            http = HTTPModelClient(call_config)
-            house_calls += 1
-            try:
-                system, user = _batch_prompt(task, batch, by_entity)
-                parsed = _parse_model_json(http.complete(system, user))
-                items = parsed.get("predictions")
-                if not isinstance(items, list):
-                    continue
-                seen: set[str] = set()
-                for item in items:
-                    if not isinstance(item, dict):
-                        continue
-                    eid = str(item.get("entity_id") or "")
-                    if eid not in allowed_ids or eid in seen:
-                        continue
-                    parsed_by_entity[eid] = item
-                    seen.add(eid)
-            except Exception:
-                continue
-
-    predictions = [
-        _prediction_row(
+    family = str(task.get("family") or "")
+    if (
+        family in _STABILITY_FAMILIES
+        and not use_mock
+        and config.model_endpoint
+    ):
+        base_seed = int(config.seed)
+        alt_seed = base_seed + _STABILITY_ALT_SEED_OFFSET
+        base_raw, base_calls = _collect_house_seed(
             task,
-            entity,
-            parsed_by_entity.get(str(entity.get("entity_id", "")), {}),
-            by_entity[str(entity.get("entity_id", ""))],
+            entities,
+            by_entity,
+            config,
+            started,
+            base_seed,
+            MAX_HOUSE_CALLS_GENERIC // 2,
         )
-        for entity in entities
-    ]
+        house_calls += base_calls
+        alt_budget = MAX_HOUSE_CALLS_GENERIC - house_calls
+        alt_raw, alt_calls = _collect_house_seed(
+            task,
+            entities,
+            by_entity,
+            config,
+            started,
+            alt_seed,
+            alt_budget,
+        )
+        house_calls += alt_calls
+
+        task_for_notes = dict(task)
+        task_for_notes["_base_seed"] = base_seed
+        predictions, stability_notes = _aggregate_stability_predictions(
+            task_for_notes,
+            entities,
+            by_entity,
+            base_raw,
+            alt_raw,
+        )
+        parsed_by_entity = base_raw
+    else:
+        if not use_mock and config.model_endpoint:
+            parsed_by_entity, house_calls = _collect_house_seed(
+                task,
+                entities,
+                by_entity,
+                config,
+                started,
+                int(config.seed),
+                MAX_HOUSE_CALLS_GENERIC,
+            )
+
+        predictions = [
+            _prediction_row(
+                task,
+                entity,
+                parsed_by_entity.get(str(entity.get("entity_id", "")), {}),
+                by_entity[str(entity.get("entity_id", ""))],
+            )
+            for entity in entities
+        ]
 
     target_type = _target_type(task)
-    if target_type == "ranking":
+    if target_type == "ranking" and family not in _STABILITY_FAMILIES:
         order = sorted(
             predictions,
             key=lambda r: (-float(r["point_forecast"]), r["entity_id"]),
@@ -493,6 +693,7 @@ def generic_run(
     answer["notes"]["house_batch_size"] = BATCH_SIZE
     answer["notes"]["retrieval_top_k"] = TOP_K
     answer["notes"]["fallback"] = "deterministic_task_fallback"
+    answer["notes"].update(stability_notes)
     return answer
 
 
