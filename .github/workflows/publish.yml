@@ -27,4 +27,4 @@ jobs:
           push: true
           provenance: false
           tags: |
-            ghcr.io/${{ github.repository_owner }}/agenthon2026-t4:v4-s-seed-stability
+            ghcr.io/${{ github.repository_owner }}/agenthon2026-t4:v5-2-classification-intervals
