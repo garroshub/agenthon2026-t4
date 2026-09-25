@@ -1,6 +1,6 @@
 # Track 4 local numerical artifact provenance
 
-Updated: 2026-09-23
+Updated: 2026-09-24
 
 This record covers the local numerical artifacts used by the v3-safe development candidate. Evaluation-time inputs and citations remain limited to the supplied task and frozen corpus. No public-unit realized outcome is stored in the runtime image.
 
