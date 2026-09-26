@@ -62,3 +62,13 @@ def test_non_credit_candidate_path_unchanged():
     assert [(x.doc_id,x.span_start,x.span_end) for x in prod] == [
         (x.doc_id,x.span_start,x.span_end) for x in base
     ]
+
+
+def test_credit_candidate_text_budget_never_exceeds_v6_e1():
+    task=_task()
+    corpus=build_index(PUBLIC/"corpus",task["cutoff_date"])
+    index=BM25Index(corpus.chunks,task["cutoff_date"])
+    for entity in task["entities"]:
+        base=main._candidates(task,entity,index)
+        prod=main._production_candidates(task,entity,index)
+        assert sum(len(x.text) for x in prod) <= sum(len(x.text) for x in base)

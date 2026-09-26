@@ -168,4 +168,5 @@ Cutoff gate: the learned EPS interval artifact is used only when `cutoff_date >=
 - Generic risk language, accounting-only cash definitions, remediated/negated events and conditional facility capacity without current availability are rejected.
 - CIK membership is a hard filter. No cross-issuer chunk is eligible.
 - No generated summary, probability, label or outcome rule is introduced.
-- Historical/current engineering gate: 10 issuer-cutoff packages, mean strong-fact recall 0.2581 -> 0.8924, 10/10 improved, 0 worse, 0 lost baseline strong categories, 0 cross-issuer violations; adversarial tests 7/7 PASS.
+- Final budgeted engineering gate: 10 issuer-cutoff packages, mean strong-fact recall 0.2581 -> 0.8757, 10/10 improved, 0 worse, 0 lost baseline strong categories, 0 cross-issuer violations; adversarial tests 7/7 PASS.
+- Hard budget guard: per issuer, selected evidence text may not exceed the original V6-E1 TOP_K text volume. On the current credit unit this reduces serialized House user-prompt characters from 62,512 to 55,971 while keeping House call cap, batch size and prompt instructions unchanged.

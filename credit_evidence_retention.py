@@ -187,8 +187,15 @@ def select_credit_evidence(
     if top_k <= 0:
         return base_candidates
 
+    # Hard input-budget guard: the retained evidence text for an issuer may
+    # never exceed the character volume of the original production TOP_K.
+    # This prevents the probe from gaining information simply by sending more
+    # filing text to House.
+    char_budget = sum(len(chunk.text) for chunk in base_candidates[:top_k])
+
     chosen: list[Any] = []
     covered: set[str] = set()
+    chosen_chars = 0
     for chunk in base_candidates:
         categories = set(strong_categories(chunk.text))
         if not categories or categories <= covered:
@@ -196,9 +203,10 @@ def select_credit_evidence(
         if any(_jaccard(chunk.text, existing.text) > 0.82 for existing in chosen):
             continue
         chosen.append(chunk)
+        chosen_chars += len(chunk.text)
         covered.update(categories)
 
-    if len(chosen) > top_k:
+    if len(chosen) > top_k or chosen_chars > char_budget:
         return base_candidates
 
     pool: dict[tuple[str, int, int], dict[str, Any]] = {}
@@ -235,16 +243,30 @@ def select_credit_evidence(
 
     scored.sort(key=lambda row: (-row[0], row[1].doc_id, row[1].span_start))
 
-    for _, chunk, categories in scored:
-        if len(chosen) >= top_k:
+    # Add genuinely new factual categories without exceeding the original
+    # evidence-text budget. Reconsider the full pool at each step so a shorter
+    # chunk can win when a longer high-score chunk no longer fits.
+    while len(chosen) < top_k:
+        best: tuple[int, float, int, Any, set[str]] | None = None
+        for score, chunk, categories in scored:
+            if any(_same_chunk(chunk, existing) for existing in chosen):
+                continue
+            gain = categories - covered
+            if not gain:
+                continue
+            if any(_jaccard(chunk.text, existing.text) > 0.82 for existing in chosen):
+                continue
+            cost = len(chunk.text)
+            if chosen_chars + cost > char_budget:
+                continue
+            rank = (len(gain), float(score), -cost, chunk, categories)
+            if best is None or rank[:3] > best[:3]:
+                best = rank
+        if best is None:
             break
-        if categories <= covered:
-            continue
-        if any(_same_chunk(chunk, existing) for existing in chosen):
-            continue
-        if any(_jaccard(chunk.text, existing.text) > 0.82 for existing in chosen):
-            continue
+        _, _, _, chunk, categories = best
         chosen.append(chunk)
+        chosen_chars += len(chunk.text)
         covered.update(categories)
 
     for chunk in base_candidates:
@@ -254,6 +276,9 @@ def select_credit_evidence(
             continue
         if any(_jaccard(chunk.text, existing.text) > 0.82 for existing in chosen):
             continue
+        if chosen_chars + len(chunk.text) > char_budget:
+            continue
         chosen.append(chunk)
+        chosen_chars += len(chunk.text)
 
     return chosen[:top_k]
