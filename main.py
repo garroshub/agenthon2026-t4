@@ -14,6 +14,7 @@ from eps_growth_family import run_eps_growth
 from output_contract import OutputContractError, atomic_write_json, finalize_answer
 from safe_calibration import apply_safe_calibration
 from v6_e1_eps_adapter import apply_v6_e1_eps_adapter
+from credit_evidence_retention import select_credit_evidence, strong_categories
 from strong_rag_baseline.agent import EntityResult, _parse_model_json
 from strong_rag_baseline.client import HTTPModelClient
 from strong_rag_baseline.config import Config
@@ -177,6 +178,13 @@ def _candidates(task: dict, entity: dict, index: BM25Index) -> list[Chunk]:
     if not broad and index.chunks:
         broad = [index.chunks[0]]
     return broad
+
+
+def _production_candidates(task: dict, entity: dict, index: BM25Index) -> list[Chunk]:
+    base = _candidates(task, entity, index)
+    if str(task.get("family") or "") != "credit_event":
+        return base
+    return select_credit_evidence(task, entity, index, base, top_k=TOP_K)
 
 
 def _payload_candidates(chunks: list[Chunk]) -> list[dict[str, Any]]:
@@ -602,7 +610,7 @@ def generic_run(
     config = replace(config, max_retries=1)
     entities = [x for x in task.get("entities", []) if isinstance(x, dict)]
     by_entity = {
-        str(e.get("entity_id", "")): _candidates(task, e, index)
+        str(e.get("entity_id", "")): _production_candidates(task, e, index)
         for e in entities
     }
 
@@ -732,7 +740,7 @@ def emergency_answer(task: dict, corpus_dir: Path) -> dict:
     predictions: list[dict[str, Any]] = []
 
     for entity in entities:
-        chunks = _candidates(task, entity, index)
+        chunks = _production_candidates(task, entity, index)
         predictions.append(_prediction_row(task, entity, {}, chunks))
 
     target_type = _target_type(task)

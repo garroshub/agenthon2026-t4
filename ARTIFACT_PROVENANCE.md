@@ -158,3 +158,14 @@ Cutoff gate: the learned EPS interval artifact is used only when `cutoff_date >=
 - On an override, existing V5.2/House citations are preserved and the locked cutoff-safe GAAP diluted-EPS input span is appended. This avoids discarding the base prediction-support chain while retaining an auditable citation for the deterministic inputs.
 - V5.2 q96 interval calibration remains the only EPS interval rail and runs after the adapter.
 - Protocol lock: outputs/v6-e1-eps-probe/V6_E1_PROTOCOL_LOCK.json in the research workspace.
+
+
+## V7-A Credit fact-preserving retrieval — 2026-09-26
+- Only the credit_event evidence-selection path changes.
+- House prompt, seed, call count/cap, reducer, probability contract and [0,1] interval remain unchanged.
+- Baseline TOP_K remains 5.
+- The selector preserves distinct strong factual categories already visible in V6-E1, then fills open slots with same-issuer original filing chunks containing current quantitative debt-service facts.
+- Generic risk language, accounting-only cash definitions, remediated/negated events and conditional facility capacity without current availability are rejected.
+- CIK membership is a hard filter. No cross-issuer chunk is eligible.
+- No generated summary, probability, label or outcome rule is introduced.
+- Historical/current engineering gate: 10 issuer-cutoff packages, mean strong-fact recall 0.2581 -> 0.8924, 10/10 improved, 0 worse, 0 lost baseline strong categories, 0 cross-issuer violations; adversarial tests 7/7 PASS.

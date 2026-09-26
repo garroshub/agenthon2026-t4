@@ -23,6 +23,7 @@ COPY auction_family.py ./auction_family.py
 COPY eps_growth_family.py ./eps_growth_family.py
 COPY safe_calibration.py ./safe_calibration.py
 COPY v6_e1_eps_adapter.py ./v6_e1_eps_adapter.py
+COPY credit_evidence_retention.py ./credit_evidence_retention.py
 COPY ARTIFACT_PROVENANCE.md ./ARTIFACT_PROVENANCE.md
 COPY output_contract.py ./output_contract.py
 COPY analysis.schema.json ./analysis.schema.json

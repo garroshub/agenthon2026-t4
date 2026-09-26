@@ -27,4 +27,4 @@ jobs:
           push: true
           provenance: false
           tags: |
-            ghcr.io/${{ github.repository_owner }}/agenthon2026-t4:v6-e1-eps-probe
+            ghcr.io/${{ github.repository_owner }}/agenthon2026-t4:v7-a-credit-retention
